@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ANANYA — photo cube</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: #000000;            /* deep space (starfield applied via JS) */
+    color: #9a94a8;
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Full-viewport fixed canvas (immersive hero, no sticky quirks). */
+  canvas#c {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    z-index: 0;
+  }
+
+  /* Tall transparent spacer: its scroll length drives progress (0..1). */
+  #scroll {
+    position: relative;
+    z-index: 1;
+    height: 900vh;
+    pointer-events: none;
+  }
+
+  #hint {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    letter-spacing: .22em;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: #b9b3a8;
+    transition: opacity .5s ease;
+    pointer-events: none;
+    z-index: 2;
+  }
+  @media (prefers-reduced-motion: reduce) { #hint { display: none; } }
+
+  #replay {
+    position: fixed; right: 24px; bottom: 22px;
+    display: none; z-index: 3; cursor: pointer;
+    font: 600 10px/1 inherit; letter-spacing: .18em; text-transform: uppercase;
+    color: #8a857c; background: rgba(255,255,255,.6);
+    border: 1px solid #ddd5c8; padding: 9px 16px; border-radius: 999px;
+    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  }
+  #replay:hover { background: rgba(255,255,255,.92); }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+<div id="scroll"></div>
+<div id="hint">Scroll</div>
+<button id="replay">↺ back to cube</button>
+
+<script type="importmap">
+{ "imports": { "three": "./lib/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from './lib/RoundedBoxGeometry.js';
+import { RoomEnvironment } from './lib/RoomEnvironment.js';
+
+// ================================================================= geometry constants
+const PITCH    = 1.0;    // spacing between tile centres on a face
+const TILE     = 0.9;    // photo tile edge (gap -> matte-black seam)
+const DEPTH    = 0.12;   // card thickness (physical depth + black sides)
+const CORE_H   = 1.4;    // half-size of the black internal core
+const SURFACE  = CORE_H + DEPTH / 2;   // where a closed card sits on the core
+
+const HERO_Y   = THREE.MathUtils.degToRad(-25);  // three-quarter yaw -> reveals Right
+const HERO_X   = THREE.MathUtils.degToRad(18);   // slightly from above -> reveals Top
+
+// Whimsical galaxy palettes (deep -> vivid): purple / blue / pink nebula.
+const GAL = [
+  ['#160b2e','#5b1e9c','#c81d77','#ff5da2'], ['#0d0a33','#3b28cc','#8a2be2','#ff49c0'],
+  ['#1a0836','#6a0dad','#b5179e','#4361ee'], ['#120a2e','#7209b7','#f72585','#4cc9f0'],
+  ['#0b1033','#4a2fbd','#9d4edd','#ff70a6'], ['#1c0b2e','#8e2de2','#e0219a','#5170ff'],
+];
+const hexA = (h, a) => { const n = parseInt(h.slice(1), 16); return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`; };
+
+// Face order fixes the tile -> photo numbering demanded by the brief:
+//   Top 1-9, Front 10-18, Right 19-27, Back 28-36, Left 37-45, Bottom 46-54.
+// Each face: row 0 = top, col 0 = left; row-major left->right, top->bottom.
+const FACES = [
+  { name:'top',    n:[ 0, 1, 0], up:[ 0, 0,-1], rt:[ 1, 0, 0] },
+  { name:'front',  n:[ 0, 0, 1], up:[ 0, 1, 0], rt:[ 1, 0, 0] },
+  { name:'right',  n:[ 1, 0, 0], up:[ 0, 1, 0], rt:[ 0, 0,-1] },
+  { name:'back',   n:[ 0, 0,-1], up:[ 0, 1, 0], rt:[-1, 0, 0] },
+  { name:'left',   n:[-1, 0, 0], up:[ 0, 1, 0], rt:[ 0, 0, 1] },
+  { name:'bottom', n:[ 0,-1, 0], up:[ 0, 0, 1], rt:[ 1, 0, 0] },
+];
+
+// ================================================================= renderer / scene
+const canvas  = document.getElementById('c');
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 16 / 9, 0.1, 100);
+camera.position.set(0, 0, 11.2);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
+
+scene.add(new THREE.HemisphereLight(0xfff6ea, 0x9a8f7d, 0.55));
+const key = new THREE.DirectionalLight(0xfff3e2, 2.1); key.position.set(-4, 6, 6); scene.add(key);
+const rim = new THREE.DirectionalLight(0xffffff, 0.35); rim.position.set(5, -2, -4); scene.add(rim);
+
+// Deep-space backdrop: black page + stardust starfield behind the transparent canvas.
+const shadow = makeContactShadow();   // kept for the API; not shown on the black backdrop
+shadow.visible = false;
+makeStarfield();
+
+// Everything that moves lives in `stage`; late-phase camera pans/zooms are
+// applied as stage transforms (rotation eases to 0 for the flat mosaic).
+const stage = new THREE.Group();
+scene.add(stage);
+
+// ---------------------------------------------------------------- black core
+const coreMat = new THREE.MeshStandardMaterial({
+  color: 0x0b0b0d, roughness: 0.85, metalness: 0.0, transparent: true, opacity: 1,
+});
+const core = new THREE.Mesh(new RoundedBoxGeometry(2*CORE_H, 2*CORE_H, 2*CORE_H, 4, 0.08), coreMat);
+core.visible = false;                 // internal core hidden (transparent) per request
+coreMat.opacity = 0;
+stage.add(core);
+
+// ---------------------------------------------------------------- 54 photo cards
+const IDENT = new THREE.Quaternion();
+const cardBodyGeo = new RoundedBoxGeometry(TILE, TILE, DEPTH, 3, 0.03);
+const photoGeo    = new THREE.PlaneGeometry(TILE * 0.985, TILE * 0.985);
+const blackSide   = new THREE.MeshStandardMaterial({ color: 0x08080a, roughness: 0.8, metalness: 0 });
+
+// deterministic pseudo-random for constellation depth / editorial jitter
+let seed = 7;
+const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+
+const cards = [];
+const _m = new THREE.Matrix4();
+const _r = new THREE.Vector3(), _u = new THREE.Vector3(), _n = new THREE.Vector3();
+
+FACES.forEach((face, fi) => {
+  const n  = new THREE.Vector3().fromArray(face.n);
+  const up = new THREE.Vector3().fromArray(face.up);
+  const rt = new THREE.Vector3().fromArray(face.rt);
+
+  for (let r = 0; r < 3; r++)
+  for (let c = 0; c < 3; c++) {
+    const idx = fi * 9 + r * 3 + c;             // 0..53  (photo/facelet id)
+
+    // orientation on the closed cube
+    _r.copy(rt); _u.copy(up); _n.copy(n);
+    _m.makeBasis(_r, _u, _n);
+    const qCube = new THREE.Quaternion().setFromRotationMatrix(_m);
+
+    // local in-face grid offset (unit = PITCH), r=0 is the top row
+    const gx = (c - 1), gy = (1 - r);
+    const inFace = new THREE.Vector3()
+      .addScaledVector(rt, gx * PITCH)
+      .addScaledVector(up, gy * PITCH);
+
+    const onCube = n.clone().multiplyScalar(SURFACE).add(inFace);
+
+    // tile = one single-sided image plane: the outward surface carries the
+    // image, the inside/back is transparent (no black body at all).
+    const g = new THREE.Group();
+    const tex = makeGalaxy(idx);
+    const mat  = new THREE.MeshPhysicalMaterial({
+      map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: 0.42,
+      roughness: 0.45, metalness: 0.0,
+      clearcoat: 0.3, clearcoatRoughness: 0.4, envMapIntensity: 0.5,
+      side: THREE.FrontSide,
+    });
+    const photo = new THREE.Mesh(photoGeo, mat);
+    g.add(photo);
+    stage.add(g);
+
+    // panel-net anchor (Frame D): whole face floats out along its normal
+    const panelCenter = n.clone().multiplyScalar(2.7);
+    if (face.name === 'back') panelCenter.add(new THREE.Vector3(0.5, 0.25, 0));
+    const openQuat = qCube.clone().slerp(IDENT, 0.6);   // rotate grid toward camera
+
+    // radial constellation anchor (Frame F): flung outward along its own path
+    const radial = onCube.clone().normalize();
+    const depth  = (rnd() - 0.5) * 1.6;
+    const constel = onCube.clone().multiplyScalar(1.95).addScaledVector(radial, 0.4);
+    constel.z += depth;
+
+    // flat editorial mosaic slot (Frames G/H): 9 cols x 6 rows, gentle offsets
+    const mc = idx % 9, mr = Math.floor(idx / 9);
+    const rowOff = (mr % 2 === 0 ? 1 : -1) * 0.14;
+    const mosaic = new THREE.Vector3(
+      (mc - 4) * 1.14 + rowOff,
+      (2.5 - mr) * 1.14 + (rnd() - 0.5) * 0.12,
+      0,
+    );
+
+    cards.push({
+      g, mat, n, rt, up, qCube, openQuat, inFace,
+      onCube, panelCenter, constel, mosaic, gx, gy,
+    });
+  }
+});
+
+// ================================================================= photo textures
+const texLoader = new THREE.TextureLoader();
+fetch('photos.json').then(r => r.ok ? r.json() : []).then(list => {
+  if (!Array.isArray(list) || list.length === 0) return;
+  cards.forEach((card, i) => {
+    const name = list[i % list.length];
+    texLoader.load('photos/' + name, tex => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      coverCrop(tex);
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      card.mat.map = tex;
+      card.mat.emissiveMap = null; card.mat.emissiveIntensity = 0;   // real photos render normally
+      card.mat.needsUpdate = true;
+    });
+  });
+}).catch(() => {});
+
+function coverCrop(tex) {
+  const ar = tex.image.width / tex.image.height;
+  tex.center.set(0.5, 0.5);
+  if (ar >= 1) tex.repeat.set(1 / ar, 1); else tex.repeat.set(1, ar);
+  tex.needsUpdate = true;
+}
+
+// ================================================================= scroll timeline
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+
+let target = 0, progress = 0;
+function readScroll() {
+  const track = document.getElementById('scroll');
+  const max = track.scrollHeight - innerHeight;
+  target = max > 0 ? clamp01(scrollY / max) : 0;
+  const hint = document.getElementById('hint');
+  if (hint) hint.style.opacity = target > 0.03 ? '0' : '0.85';
+}
+addEventListener('scroll', readScroll, { passive: true });
+readScroll();
+
+// ---- free infinite-canvas exploration (engaged at the end of the journey) ----
+// The 54 tiles form one seamless field cell; wrapping their positions by the
+// cell size makes the archive repeat infinitely in every direction. Pan it with
+// drag or wheel/trackpad. Continuous with the journey: at hand-off the tiles are
+// already the zoomed, flattened mosaic, so entering free mode with pan 0 is seamless.
+const ZOOM_SCALE = 1.9;
+const cellW = 9 * 1.14, cellH = 6 * 1.14;
+let freeMode = false, retracting = false, panX = 0, panY = 0, dragging = false, lastPX = 0, lastPY = 0;
+const wrap = (v, c) => ((v + c / 2) % c + c) % c - c / 2;
+const hintEl = document.getElementById('hint');
+const replayBtn = document.getElementById('replay');
+
+function enterFree() {
+  freeMode = true;
+  hintEl.style.display = 'none';
+  replayBtn.style.display = 'block';
+  canvas.style.cursor = 'grab';
+}
+function exitFree() {
+  // Leave free mode and retract: animate the whole journey backwards to the cube.
+  freeMode = false; retracting = true; panX = 0; panY = 0;
+  replayBtn.style.display = 'none';
+  hintEl.style.display = '';
+  canvas.style.cursor = '';
+}
+replayBtn.addEventListener('click', exitFree);
+
+function applyFree() {
+  stage.rotation.set(0, 0, 0);
+  stage.position.set(0, 0, 0);
+  stage.scale.setScalar(ZOOM_SCALE);
+  core.visible = false; shadow.visible = false;
+  for (const card of cards) {
+    card.g.position.set(wrap(card.mosaic.x - panX, cellW), wrap(card.mosaic.y - panY, cellH), 0);
+    card.g.quaternion.copy(IDENT);
+  }
+}
+
+addEventListener('wheel', e => {
+  if (!freeMode) return;
+  e.preventDefault();
+  panX += e.deltaX * 0.01;
+  panY -= e.deltaY * 0.01;
+}, { passive: false });
+canvas.addEventListener('pointerdown', e => {
+  if (!freeMode) return;
+  dragging = true; lastPX = e.clientX; lastPY = e.clientY; canvas.style.cursor = 'grabbing';
+});
+addEventListener('pointermove', e => {
+  if (!dragging || !freeMode) return;
+  const k = 0.013;
+  panX -= (e.clientX - lastPX) * k;
+  panY += (e.clientY - lastPY) * k;
+  lastPX = e.clientX; lastPY = e.clientY;
+});
+addEventListener('pointerup', () => { dragging = false; if (freeMode) canvas.style.cursor = 'grab'; });
+
+// reusable temporaries for the per-frame layout
+const pA = new THREE.Vector3(), pB = new THREE.Vector3(), pC = new THREE.Vector3();
+const qA = new THREE.Quaternion();
+const off = new THREE.Vector3();
+
+function layout(p, time) {
+  // -------- phase weights (each eases over its own scroll window) ----------
+  const wLift    = smooth(0.02, 0.06, p) * (1 - smooth(0.10, 0.16, p));
+  const wSep     = smooth(0.09, 0.20, p);   // face panels straight out
+  const wOpen    = smooth(0.20, 0.33, p);   // panels splay into a net
+  const wSplit   = smooth(0.33, 0.45, p);   // panels subdivide (gaps grow)
+  const wConstel = smooth(0.44, 0.60, p);   // radial constellation
+  const wFlat    = smooth(0.58, 0.74, p);   // collapse to flat mosaic
+  const wZoom    = smooth(0.78, 0.90, p);   // zoom into the mosaic, then hand off to free mode
+
+  const faceCam = clamp01(Math.max(wOpen * 0.5, wConstel * 0.8, wFlat));
+  const openPitch = PITCH * (1 + wSplit * 0.85);   // gaps open up within a panel
+
+  for (const card of cards) {
+    // A: closed on the core, with an anticipatory micro-lift
+    pA.copy(card.onCube).addScaledVector(card.n, wLift * 0.09);
+
+    // B: face panel translated straight out along its normal
+    pB.copy(card.onCube).addScaledVector(card.n, 0.62);
+    pA.lerp(pB, wSep);
+
+    // C: panel splays to its net anchor and rotates toward the camera
+    off.copy(card.rt).multiplyScalar(card.gx * openPitch)
+       .addScaledVector(card.up, card.gy * openPitch)
+       .applyQuaternion(card.openQuat);
+    pB.copy(card.panelCenter).add(off);
+    pA.lerp(pB, wOpen);
+
+    // F: radial constellation
+    pA.lerp(card.constel, wConstel);
+
+    // H: flat editorial mosaic
+    pA.lerp(card.mosaic, wFlat);
+
+    card.g.position.copy(pA);
+
+    // orientation: cube basis -> face the camera as things open/flatten
+    qA.copy(card.qCube).slerp(IDENT, faceCam);
+    card.g.quaternion.copy(qA);
+  }
+
+  // internal core stays hidden (transparent) — the cube reads as floating tiles
+  core.visible = false;
+
+  // contact shadow fades once the cube is gone (no floor in the canvas phase)
+  shadow.material.opacity = 0.9 * (1 - smooth(0.38, 0.58, p));
+  shadow.visible = shadow.material.opacity > 0.01;
+
+  // -------- stage orientation + late-phase camera moves --------------------
+  const upright = clamp01(Math.max(wConstel * 0.85, wFlat));
+  const idle = (p < 0.09 && !reduced) ? Math.sin(time * 0.3) * 0.03 : 0;
+  stage.rotation.y = HERO_Y * (1 - upright) + smooth(0.02, 0.07, p) * 0.12 + idle;
+  stage.rotation.x = HERO_X * (1 - upright);
+
+  stage.scale.setScalar(1 + wZoom * 0.9);   // -> ZOOM_SCALE at the hand-off
+  stage.position.set(0, 0, 0);
+}
+
+// ===================================================================== loop
+let t0 = performance.now();
+function frame() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - t0) / 1000); t0 = now;
+  if (freeMode) {
+    applyFree();
+  } else if (retracting) {
+    // reverse the journey: ease progress down to 0, replaying every step backwards
+    progress += (0 - progress) * Math.min(1, dt * 2.4);
+    if (progress < 0.004) { progress = 0; retracting = false; window.scrollTo(0, 0); }
+    layout(reduced ? 0 : progress, now / 1000);
+  } else {
+    if (!reduced && progress >= 0.92) enterFree();
+    progress += (target - progress) * (reduced ? 1 : Math.min(1, dt * 6));
+    layout(reduced ? 0 : progress, now / 1000);
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+// ===================================================================== texture makers
+// Whimsical galaxy tile — a vivid purple/blue/pink nebula gradient with drifting
+// glow clouds, scattered stars, and the odd looping ring. Deterministic per tile.
+function makeGalaxy(i) {
+  const s = 512, cv = document.createElement('canvas'); cv.width = cv.height = s;
+  const g = cv.getContext('2d');
+  let st = ((i + 1) * 2654435761) >>> 0;
+  const rr = () => (st = (st * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const pal = GAL[i % GAL.length];
+
+  // base nebula gradient across a random diagonal
+  const ang = rr() * Math.PI * 2;
+  const x0 = s / 2 + Math.cos(ang) * s * 0.7, y0 = s / 2 + Math.sin(ang) * s * 0.7;
+  const grd = g.createLinearGradient(x0, y0, s - x0, s - y0);
+  grd.addColorStop(0.0, pal[0]);
+  grd.addColorStop(0.5, pal[1]);
+  grd.addColorStop(1.0, pal[2]);
+  g.fillStyle = grd; g.fillRect(0, 0, s, s);
+
+  // additive glow clouds (nebula)
+  g.globalCompositeOperation = 'lighter';
+  for (let k = 0; k < 4; k++) {
+    const cx = rr() * s, cy = rr() * s, r = s * (0.22 + rr() * 0.42);
+    const col = pal[2 + (k % 2)];
+    const rg = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0, hexA(col, 0.5)); rg.addColorStop(1, hexA(col, 0));
+    g.fillStyle = rg; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill();
+  }
+  g.globalCompositeOperation = 'source-over';
+
+  // stars
+  for (let k = 0; k < 46; k++) {
+    const x = rr() * s, y = rr() * s, rad = rr() * rr() * 2.6 + 0.4;
+    g.fillStyle = `rgba(255,255,255,${0.35 + rr() * 0.6})`;
+    g.beginPath(); g.arc(x, y, rad, 0, 7); g.fill();
+  }
+
+  // whimsical bright gradient bloom on some tiles (no ring / loader look)
+  if (i % 2 === 0) {
+    g.globalCompositeOperation = 'lighter';
+    const cx = s * (0.3 + rr() * 0.4), cy = s * (0.3 + rr() * 0.4), r = s * (0.2 + rr() * 0.18);
+    const rg = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0.0, hexA('#ffffff', 0.7));
+    rg.addColorStop(0.4, hexA(pal[3], 0.5));
+    rg.addColorStop(1.0, hexA(pal[3], 0));
+    g.fillStyle = rg; g.beginPath(); g.arc(cx, cy, r, 0, 7); g.fill();
+    g.globalCompositeOperation = 'source-over';
+  }
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+  return tex;
+}
+
+// Black page + stardust: faint nebula haze and hundreds of stars, set as the
+// fixed body background behind the transparent WebGL canvas.
+function makeStarfield() {
+  const w = 1600, h = 1200, cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#000000'; g.fillRect(0, 0, w, h);
+  const neb = [['#3a1c71', 0.16], ['#5b2a86', 0.14], ['#88306e', 0.12], ['#1b2a6b', 0.15]];
+  for (let k = 0; k < 8; k++) {
+    const c = neb[k % neb.length], x = Math.random() * w, y = Math.random() * h, r = 300 + Math.random() * 420;
+    const rg = g.createRadialGradient(x, y, 0, x, y, r);
+    rg.addColorStop(0, hexA(c[0], c[1])); rg.addColorStop(1, hexA(c[0], 0));
+    g.fillStyle = rg; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+  }
+  for (let k = 0; k < 540; k++) {
+    const x = Math.random() * w, y = Math.random() * h, r = Math.random() * Math.random() * 1.8 + 0.3;
+    g.fillStyle = `rgba(255,255,255,${0.3 + Math.random() * 0.7})`;
+    g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+  }
+  for (let k = 0; k < 26; k++) {                     // a few glowing bright stars
+    const x = Math.random() * w, y = Math.random() * h, r = 5 + Math.random() * 6;
+    const rg = g.createRadialGradient(x, y, 0, x, y, r);
+    rg.addColorStop(0, 'rgba(255,255,255,0.9)'); rg.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = rg; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+  }
+  document.body.style.background = `#000 url(${cv.toDataURL('image/png')}) center / cover fixed`;
+}
+
+function makeContactShadow() {
+  const s = 256, cv = document.createElement('canvas'); cv.width = cv.height = s;
+  const g = cv.getContext('2d');
+  const grad = g.createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+  grad.addColorStop(0.0, 'rgba(60,52,40,0.42)');
+  grad.addColorStop(0.55, 'rgba(60,52,40,0.13)');
+  grad.addColorStop(1.0, 'rgba(60,52,40,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, s, s);
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(9, 9), mat);
+  mesh.rotation.x = -Math.PI / 2; mesh.position.y = -2.6;
+  return mesh;
+}
+</script>
+</body>
+</html>

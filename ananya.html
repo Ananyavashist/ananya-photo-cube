@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ANANYA — falling letters</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: #141418;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    color: #9a9aa4;
+    padding: 24px;
+  }
+  canvas {
+    width: min(100%, 1100px);
+    height: auto;
+    border-radius: 10px;
+    box-shadow: 0 24px 70px rgba(0,0,0,.6);
+    background: #0b0b0f;
+  }
+  .bar { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button {
+    font: 600 13px/1 inherit;
+    letter-spacing: .04em;
+    padding: 10px 18px;
+    border-radius: 999px;
+    border: 1px solid #33333d;
+    background: #1e1e24;
+    color: #e8e8ee;
+    cursor: pointer;
+  }
+  button:hover { background: #2a2a33; border-color: #4a4a57; }
+  button:disabled { opacity: .45; cursor: default; }
+  #status { min-height: 1.5em; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<canvas id="c" width="1920" height="1080"></canvas>
+
+<div class="bar">
+  <button id="replay">↻ Replay</button>
+  <button id="record">● Record video</button>
+</div>
+<div id="status">Letters fall, collide, then settle into the name.</div>
+
+<script>
+const cv  = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+
+// ---------------------------------------------------------------- config
+const NAME       = "ANANYA";
+const FONT_SIZE  = 250;
+const FONT       = `900 ${FONT_SIZE}px "Arial Black","Helvetica Neue",Helvetica,Arial,sans-serif`;
+const TRACKING   = 14;        // extra px between glyphs in the final word
+const REST_Y     = H * 0.50;  // where letters come to rest / the collision floor
+const FPS        = 60;
+
+const STAGGER      = 0.085;   // s between each letter starting its fall
+const SETTLE_START = 2.30;    // s — physics stops, letters spring into place
+const END          = 3.90;    // s — total length
+
+const GRAVITY     = 2600;
+const RESTITUTION = 0.38;     // floor bounciness
+const PAIR_REST   = 0.50;     // letter-on-letter bounciness
+const MAX_SPIN    = 4.2;      // rad/s — past this it reads as spinning, not tumbling
+
+// ------------------------------------------------------------- letter setup
+ctx.font = FONT;
+ctx.textBaseline = 'middle';
+
+const glyphs = NAME.split('').map(ch => {
+  const m = ctx.measureText(ch);
+  return {
+    ch,
+    w: m.width,
+    h: (m.actualBoundingBoxAscent || FONT_SIZE * .72) + (m.actualBoundingBoxDescent || 0)
+  };
+});
+
+// final centered layout
+const totalW = glyphs.reduce((s, g) => s + g.w, 0) + TRACKING * (glyphs.length - 1);
+let cursor = (W - totalW) / 2;
+glyphs.forEach(g => { g.tx = cursor + g.w / 2; g.ty = REST_Y; cursor += g.w + TRACKING; });
+
+// deterministic pseudo-random so every run (and every recording) is identical
+let seed = 20260721;
+const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+const rr  = (a, b) => a + rnd() * (b - a);
+
+let bodies = [], particles = [], frame = 0;
+
+function reset() {
+  seed = 20260721;
+  frame = 0;
+  particles = [];
+  bodies = glyphs.map((g, i) => ({
+    ...g,
+    // scattered entry — out of order, and close enough together to actually hit
+    x: W / 2 + rr(-0.19, 0.19) * W,
+    y: -FONT_SIZE - rr(0.25, 1.05) * H,
+    vx: rr(-70, 70),
+    vy: 0,
+    ang: rr(-0.7, 0.7),
+    av: rr(-2.0, 2.0),
+    r: (g.w / 2 + g.h / 2) / 2 * 0.86,   // collision radius
+    squash: 0,
+    start: i * STAGGER,
+    live: false
+  }));
+}
+
+function burst(x, y, power) {
+  const n = Math.min(16, Math.round(power * 9));
+  for (let i = 0; i < n; i++) {
+    const a = rr(-Math.PI, 0);
+    const s = rr(90, 130) * power;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, size: rr(2, 6) });
+  }
+}
+
+// ------------------------------------------------------------------ physics
+function step(dt, t) {
+  const settling = t >= SETTLE_START;
+
+  for (const b of bodies) {
+    if (!b.live && t >= b.start) b.live = true;
+    if (!b.live) continue;
+
+    if (settling) {
+      // take the shortest way up — otherwise a letter that spun 2.5 turns
+      // visibly unwinds all of them, which reads as rewind, not settling
+      if (!b.settled) {
+        b.settled = true;
+        b.ang = Math.atan2(Math.sin(b.ang), Math.cos(b.ang));
+        b.av = Math.max(-3, Math.min(3, b.av));
+      }
+      // spring each letter to its slot in the name — slightly underdamped
+      const k = 130, damp = 2 * Math.sqrt(k) * 0.82;
+      b.vx += (-k * (b.x - b.tx) - damp * b.vx) * dt;
+      b.vy += (-k * (b.y - b.ty) - damp * b.vy) * dt;
+      const ka = 150, da = 2 * Math.sqrt(ka) * 0.80;
+      b.av += (-ka * b.ang - da * b.av) * dt;
+    } else {
+      b.vy += GRAVITY * dt;
+    }
+
+    if (!settling) b.av = Math.max(-MAX_SPIN, Math.min(MAX_SPIN, b.av));
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.ang += b.av * dt;
+    b.squash *= Math.pow(0.0016, dt);
+
+    if (!settling) {
+      // floor
+      if (b.y > b.ty) {
+        const impact = Math.abs(b.vy);
+        b.y = b.ty;
+        b.vy = -b.vy * RESTITUTION;
+        b.vx += b.av * 26 * dt * 60;     // spin converts to skid
+        b.av *= 0.72;
+        if (impact > 260) {
+          b.squash = Math.min(0.42, impact / 5200);
+          burst(b.x, b.y + b.h / 2, Math.min(1, impact / 2600));
+        }
+        if (Math.abs(b.vy) < 90) b.vy = 0;
+        b.vx *= 0.985;
+      }
+      // walls, so nothing escapes frame
+      const pad = b.w / 2;
+      if (b.x < pad)     { b.x = pad;     b.vx = Math.abs(b.vx) * 0.6; }
+      if (b.x > W - pad) { b.x = W - pad; b.vx = -Math.abs(b.vx) * 0.6; }
+    }
+  }
+
+  // letter-on-letter collisions — the part that makes them knock each other around
+  if (!settling) {
+    for (let i = 0; i < bodies.length; i++) {
+      for (let j = i + 1; j < bodies.length; j++) {
+        const a = bodies[i], b = bodies[j];
+        if (!a.live || !b.live) continue;
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d = Math.hypot(dx, dy);
+        const min = a.r + b.r;
+        if (d >= min || d === 0) continue;
+
+        const nx = dx / d, ny = dy / d, overlap = (min - d) / 2;
+        a.x -= nx * overlap; a.y -= ny * overlap;
+        b.x += nx * overlap; b.y += ny * overlap;
+
+        const vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (vn >= 0) continue;
+        const jimp = -(1 + PAIR_REST) * vn / 2;
+        a.vx -= jimp * nx; a.vy -= jimp * ny;
+        b.vx += jimp * nx; b.vy += jimp * ny;
+
+        // glancing hits impart spin
+        const tang = (b.vx - a.vx) * -ny + (b.vy - a.vy) * nx;
+        a.av -= (jimp * 0.0022 + tang * 0.0011);
+        b.av += (jimp * 0.0022 + tang * 0.0011);
+
+        const p = Math.min(0.34, jimp / 2400);
+        a.squash = Math.max(a.squash, p);
+        b.squash = Math.max(b.squash, p);
+        if (jimp > 420) burst((a.x + b.x) / 2, (a.y + b.y) / 2, Math.min(1, jimp / 2200));
+      }
+    }
+  }
+
+  for (const p of particles) {
+    p.vy += 1500 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.life -= dt * 1.7;
+  }
+  particles = particles.filter(p => p.life > 0);
+}
+
+// ------------------------------------------------------------------- render
+function draw() {
+  ctx.fillStyle = '#0b0b0f';
+  ctx.fillRect(0, 0, W, H);
+
+  const glow = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.62);
+  glow.addColorStop(0, 'rgba(74,74,110,0.30)');
+  glow.addColorStop(1, 'rgba(11,11,15,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life) * 0.55;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.font = FONT;
+  ctx.textBaseline = 'middle';
+  for (const b of bodies) {
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.ang);
+    ctx.scale(1 + b.squash * 0.55, 1 - b.squash);   // impact squash
+    ctx.shadowColor = 'rgba(0,0,0,0.55)';
+    ctx.shadowBlur = 34;
+    ctx.shadowOffsetY = 14;
+    ctx.fillStyle = '#f5f5fa';
+    ctx.fillText(b.ch, -b.w / 2, 0);
+    ctx.restore();
+  }
+}
+
+// -------------------------------------------------------------------- loop
+let recorder = null, chunks = [], recording = false, holdUntil = 0;
+
+function tick() {
+  const t = frame / FPS;
+  const dt = 1 / FPS;
+  step(dt / 2, t);            // two substeps — stable collisions
+  step(dt / 2, t + dt / 2);
+  draw();
+  frame++;
+
+  if (t >= END) {
+    if (recording) { recorder.stop(); recording = false; }
+    else if (!holdUntil) holdUntil = performance.now() + 1200;
+    else if (performance.now() > holdUntil) { holdUntil = 0; reset(); }
+  }
+  requestAnimationFrame(tick);
+}
+
+document.getElementById('replay').onclick = () => { holdUntil = 0; reset(); };
+
+document.getElementById('record').onclick = () => {
+  const btn = document.getElementById('record');
+  const status = document.getElementById('status');
+  const type = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    ? 'video/webm;codecs=vp9' : 'video/webm';
+
+  chunks = [];
+  recorder = new MediaRecorder(cv.captureStream(FPS), { mimeType: type, videoBitsPerSecond: 12e6 });
+  recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
+  recorder.onstop = () => {
+    const url = URL.createObjectURL(new Blob(chunks, { type: 'video/webm' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'ananya.webm'; a.click();
+    URL.revokeObjectURL(url);
+    btn.disabled = false;
+    status.textContent = 'Saved ananya.webm to your Downloads.';
+  };
+
+  holdUntil = 0;
+  reset();
+  btn.disabled = true;
+  status.textContent = 'Recording ' + END.toFixed(1) + 's…';
+  recording = true;
+  recorder.start();
+};
+
+reset();
+tick();
+</script>
+</body>
+</html>
