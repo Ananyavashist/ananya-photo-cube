@@ -1,1 +1,32 @@
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs & temp
+*.log
+*.tmp
+.cache/
+
+# Node (in case tooling is ever added)
+node_modules/
+npm-debug.log*
+
+# Python (local static server byproducts)
+__pycache__/
+*.pyc
+
+# Env / secrets
+.env
+.env.*
