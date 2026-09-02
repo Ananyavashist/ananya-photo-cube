@@ -7,9 +7,10 @@
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; }
+  html, body { margin: 0; overflow-x: hidden; }
+  html { overflow-y: scroll; }
   body {
-    background: #000000;            /* deep space (starfield applied via JS) */
+    background: #000;
     color: #9a94a8;
     font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -23,6 +24,7 @@
     height: 100vh;
     display: block;
     z-index: 0;
+    touch-action: none;             /* we map wheel/touch onto window.scroll */
   }
 
   /* Tall transparent spacer: its scroll length drives progress (0..1). */
@@ -42,6 +44,7 @@
     font-size: 10px;
     text-transform: uppercase;
     color: #b9b3a8;
+    opacity: 0.85;                  /* p=0 default; avoid a first-paint fade */
     transition: opacity .5s ease;
     pointer-events: none;
     z-index: 2;
@@ -73,7 +76,6 @@
 <script type="module">
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from './lib/RoundedBoxGeometry.js';
-import { RoomEnvironment } from './lib/RoomEnvironment.js';
 
 // ================================================================= geometry constants
 const PITCH    = 1.0;    // spacing between tile centres on a face
@@ -109,27 +111,18 @@ const FACES = [
 const canvas  = document.getElementById('c');
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.setClearColor(0x000000, 1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
 const camera = new THREE.PerspectiveCamera(30, 16 / 9, 0.1, 100);
 camera.position.set(0, 0, 11.2);
 
-const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
-
-scene.add(new THREE.HemisphereLight(0xfff6ea, 0x9a8f7d, 0.55));
-const key = new THREE.DirectionalLight(0xfff3e2, 2.1); key.position.set(-4, 6, 6); scene.add(key);
-const rim = new THREE.DirectionalLight(0xffffff, 0.35); rim.position.set(5, -2, -4); scene.add(rim);
-
-// Deep-space backdrop: black page + stardust starfield behind the transparent canvas.
-const shadow = makeContactShadow();   // kept for the API; not shown on the black backdrop
+const shadow = makeContactShadow();
 shadow.visible = false;
-makeStarfield();
 
 // Everything that moves lives in `stage`; late-phase camera pans/zooms are
 // applied as stage transforms (rotation eases to 0 for the flat mosaic).
@@ -185,11 +178,8 @@ FACES.forEach((face, fi) => {
     // image, the inside/back is transparent (no black body at all).
     const g = new THREE.Group();
     const tex = makeGalaxy(idx);
-    const mat  = new THREE.MeshPhysicalMaterial({
-      map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: 0.42,
-      roughness: 0.45, metalness: 0.0,
-      clearcoat: 0.3, clearcoatRoughness: 0.4, envMapIntensity: 0.5,
-      side: THREE.FrontSide,
+    const mat  = new THREE.MeshBasicMaterial({
+      map: tex, side: THREE.FrontSide,
     });
     const photo = new THREE.Mesh(photoGeo, mat);
     g.add(photo);
@@ -199,6 +189,12 @@ FACES.forEach((face, fi) => {
     const panelCenter = n.clone().multiplyScalar(2.7);
     if (face.name === 'back') panelCenter.add(new THREE.Vector3(0.5, 0.25, 0));
     const openQuat = qCube.clone().slerp(IDENT, 0.6);   // rotate grid toward camera
+
+    // 3×3×3 cubie this tile belongs to. Tiles that share a cubie (corners
+    // have 3, edges 2, centres 1) get the same offset so the second beat is
+    // 26 cubes flying apart — not one glued cube or six 3×3 sheets.
+    const cubie = n.clone().addScaledVector(rt, gx).addScaledVector(up, gy);
+    const scatter = onCube.clone().addScaledVector(cubie, 0.78);
 
     // radial constellation anchor (Frame F): flung outward along its own path
     const radial = onCube.clone().normalize();
@@ -216,63 +212,66 @@ FACES.forEach((face, fi) => {
     );
 
     cards.push({
-      g, mat, n, rt, up, qCube, openQuat, inFace,
-      onCube, panelCenter, constel, mosaic, gx, gy,
+      g, mat, n, rt, up, qCube, openQuat, inFace, cubie,
+      onCube, panelCenter, scatter, constel, mosaic, gx, gy,
     });
   }
 });
 
 // ================================================================= photo textures
+// One unique photo per tile (collage). The list wraps if there are fewer than 54.
 const texLoader = new THREE.TextureLoader();
-fetch('photos.json').then(r => r.ok ? r.json() : []).then(list => {
-  if (!Array.isArray(list) || list.length === 0) return;
-
-  // Distribute photos across all 54 tiles so no two faces are identical.
-  // Each photo is used a balanced number of times, then the whole sequence is
-  // deterministically shuffled (same layout every reload).
-  const assign = [];
-  for (let i = 0; i < cards.length; i++) assign.push(i % list.length);
-  let s = 987654321 >>> 0;
-  const rr = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
-  for (let i = assign.length - 1; i > 0; i--) {
-    const j = Math.floor(rr() * (i + 1));
-    [assign[i], assign[j]] = [assign[j], assign[i]];
-  }
-
-  cards.forEach((card, i) => {
-    const name = list[assign[i]];
-    texLoader.load('photos/' + name, tex => {
-      tex.colorSpace = THREE.SRGBColorSpace;
-      coverCrop(tex);
-      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-      card.mat.map = tex;
-      card.mat.emissiveMap = null; card.mat.emissiveIntensity = 0;   // real photos render normally
-      card.mat.needsUpdate = true;
-    });
-  });
-}).catch(() => {});
 
 function coverCrop(tex) {
   const ar = tex.image.width / tex.image.height;
   tex.center.set(0.5, 0.5);
+  tex.offset.set(0, 0);
   if (ar >= 1) tex.repeat.set(1 / ar, 1); else tex.repeat.set(1, ar);
   tex.needsUpdate = true;
 }
+
+function applyTilePhoto(name, i) {
+  return new Promise(resolve => {
+    texLoader.load('photos/' + name, tex => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      coverCrop(tex);
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      const card = cards[i];
+      card.mat.map = tex;
+      card.mat.needsUpdate = true;
+      resolve();
+    }, undefined, () => resolve());
+  });
+}
+
+fetch('photos.json').then(r => r.ok ? r.json() : []).then(list => {
+  if (!Array.isArray(list) || list.length === 0) return;
+  Promise.all(cards.map((_, i) => applyTilePhoto(list[i % list.length], i)))
+    .then(() => readScroll());
+}).catch(() => {});
 
 // ================================================================= scroll timeline
 const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
 
+// This story always restarts at the assembled cube. Don't let the browser
+// restore a mid-page scrollY and lerp the cube toward it.
+history.scrollRestoration = 'manual';
+window.scrollTo(0, 0);
+
+const trackEl = document.getElementById('scroll');
+const hintEl = document.getElementById('hint');
+const replayBtn = document.getElementById('replay');
+const scrollMax = () => trackEl.scrollHeight - innerHeight;
+hintEl.style.opacity = '0.85';
+
 let target = 0, progress = 0;
 function readScroll() {
-  const track = document.getElementById('scroll');
-  const max = track.scrollHeight - innerHeight;
-  target = max > 0 ? clamp01(scrollY / max) : 0;
-  const hint = document.getElementById('hint');
-  if (hint) hint.style.opacity = target > 0.03 ? '0' : '0.85';
+  const max = scrollMax();
+  target = max > 0 ? clamp01(window.scrollY / max) : 0;
+  if (hintEl) hintEl.style.opacity = target > 0.03 ? '0' : '0.85';
 }
 addEventListener('scroll', readScroll, { passive: true });
-readScroll();
 
 // ---- free infinite-canvas exploration (engaged at the end of the journey) ----
 // The 54 tiles form one seamless field cell; wrapping their positions by the
@@ -283,8 +282,6 @@ const ZOOM_SCALE = 1.9;
 const cellW = 9 * 1.14, cellH = 6 * 1.14;
 let freeMode = false, retracting = false, panX = 0, panY = 0, dragging = false, lastPX = 0, lastPY = 0;
 const wrap = (v, c) => ((v + c / 2) % c + c) % c - c / 2;
-const hintEl = document.getElementById('hint');
-const replayBtn = document.getElementById('replay');
 
 function enterFree() {
   freeMode = true;
@@ -312,17 +309,49 @@ function applyFree() {
   }
 }
 
+function wheelDelta(e, axis) {
+  const v = axis === 'x' ? e.deltaX : e.deltaY;
+  return e.deltaMode === 1 ? v * 16 : e.deltaMode === 2 ? v * innerHeight : v;
+}
+
 addEventListener('wheel', e => {
-  if (!freeMode) return;
   e.preventDefault();
-  panX += e.deltaX * 0.01;
-  panY -= e.deltaY * 0.01;
+  if (freeMode) {
+    panX += wheelDelta(e, 'x') * 0.01;
+    panY -= wheelDelta(e, 'y') * 0.01;
+    return;
+  }
+  // Fixed canvas covers the viewport, so the document often never receives
+  // native scroll. Drive window.scrollY ourselves. scrollBy inside a
+  // prevented wheel may not fire a 'scroll' event — update target here.
+  window.scrollBy(wheelDelta(e, 'x'), wheelDelta(e, 'y'));
+  readScroll();
 }, { passive: false });
+
+let touchLastY = 0, touchLastX = 0;
+addEventListener('touchstart', e => {
+  if (freeMode || !e.touches.length) return;
+  touchLastX = e.touches[0].clientX;
+  touchLastY = e.touches[0].clientY;
+}, { passive: true });
+addEventListener('touchmove', e => {
+  if (freeMode || !e.touches.length) return;
+  e.preventDefault();
+  const t = e.touches[0];
+  window.scrollBy(touchLastX - t.clientX, touchLastY - t.clientY);
+  touchLastX = t.clientX;
+  touchLastY = t.clientY;
+  readScroll();
+}, { passive: false });
+
 canvas.addEventListener('pointerdown', e => {
   if (!freeMode) return;
   dragging = true; lastPX = e.clientX; lastPY = e.clientY; canvas.style.cursor = 'grabbing';
 });
+let lookX = 0, lookY = 0, lookTX = 0, lookTY = 0;
 addEventListener('pointermove', e => {
+  lookTX = (e.clientX / innerWidth) * 2 - 1;
+  lookTY = (e.clientY / innerHeight) * 2 - 1;
   if (!dragging || !freeMode) return;
   const k = 0.013;
   panX -= (e.clientX - lastPX) * k;
@@ -338,31 +367,21 @@ const off = new THREE.Vector3();
 
 function layout(p, time) {
   // -------- phase weights (each eases over its own scroll window) ----------
-  const wLift    = smooth(0.02, 0.06, p) * (1 - smooth(0.10, 0.16, p));
-  const wSep     = smooth(0.09, 0.20, p);   // face panels straight out
-  const wOpen    = smooth(0.20, 0.33, p);   // panels splay into a net
-  const wSplit   = smooth(0.33, 0.45, p);   // panels subdivide (gaps grow)
-  const wConstel = smooth(0.44, 0.60, p);   // radial constellation
-  const wFlat    = smooth(0.58, 0.74, p);   // collapse to flat mosaic
-  const wZoom    = smooth(0.78, 0.90, p);   // zoom into the mosaic, then hand off to free mode
+  // Frame 1 (p≈0): assembled cube. The very next beat explodes the 26
+  // cubies outward — they scatter instead of staying stuck together.
+  const wScatter = smooth(0.0, 0.08, p);
+  const wConstel = smooth(0.08, 0.34, p);   // follows scatter with no dead zone
+  const wFlat    = smooth(0.32, 0.56, p);   // collapse to flat mosaic
+  const wZoom    = smooth(0.56, 0.78, p);   // zoom into the mosaic, then hand off to free mode
 
-  const faceCam = clamp01(Math.max(wOpen * 0.5, wConstel * 0.8, wFlat));
-  const openPitch = PITCH * (1 + wSplit * 0.85);   // gaps open up within a panel
+  const faceCam = clamp01(Math.max(wConstel * 0.8, wFlat));
 
   for (const card of cards) {
-    // A: closed on the core, with an anticipatory micro-lift
-    pA.copy(card.onCube).addScaledVector(card.n, wLift * 0.09);
+    // A: closed cube (first frame)
+    pA.copy(card.onCube);
 
-    // B: face panel translated straight out along its normal
-    pB.copy(card.onCube).addScaledVector(card.n, 0.62);
-    pA.lerp(pB, wSep);
-
-    // C: panel splays to its net anchor and rotates toward the camera
-    off.copy(card.rt).multiplyScalar(card.gx * openPitch)
-       .addScaledVector(card.up, card.gy * openPitch)
-       .applyQuaternion(card.openQuat);
-    pB.copy(card.panelCenter).add(off);
-    pA.lerp(pB, wOpen);
+    // B: cubies scatter immediately after the first frame
+    pA.lerp(card.scatter, wScatter);
 
     // F: radial constellation
     pA.lerp(card.constel, wConstel);
@@ -372,7 +391,6 @@ function layout(p, time) {
 
     card.g.position.copy(pA);
 
-    // orientation: cube basis -> face the camera as things open/flatten
     qA.copy(card.qCube).slerp(IDENT, faceCam);
     card.g.quaternion.copy(qA);
   }
@@ -381,16 +399,20 @@ function layout(p, time) {
   core.visible = false;
 
   // contact shadow fades once the cube is gone (no floor in the canvas phase)
-  shadow.material.opacity = 0.9 * (1 - smooth(0.38, 0.58, p));
+  shadow.material.opacity = 0.9 * (1 - smooth(0.18, 0.40, p));
   shadow.visible = shadow.material.opacity > 0.01;
 
   // -------- stage orientation + late-phase camera moves --------------------
   const upright = clamp01(Math.max(wConstel * 0.85, wFlat));
-  const idle = (p < 0.09 && !reduced) ? Math.sin(time * 0.3) * 0.03 : 0;
-  stage.rotation.y = HERO_Y * (1 - upright) + smooth(0.02, 0.07, p) * 0.12 + idle;
-  stage.rotation.x = HERO_X * (1 - upright);
+  const lookW = reduced ? 0 : (1 - wScatter) * (1 - upright);
+  lookX += (lookTX - lookX) * 0.12;
+  lookY += (lookTY - lookY) * 0.12;
+  stage.rotation.y = HERO_Y * (1 - upright) + smooth(0.02, 0.07, p) * 0.12 + lookW * lookX * 0.42;
+  stage.rotation.x = HERO_X * (1 - upright) + lookW * lookY * 0.28;
 
-  stage.scale.setScalar(1 + wZoom * 0.9);   // -> ZOOM_SCALE at the hand-off
+  // Ease the exploded set back into frame, then zoom into the mosaic.
+  const hold = 1 - wScatter * 0.14 * (1 - Math.max(wConstel, wFlat));
+  stage.scale.setScalar(hold * (1 + wZoom * 0.9));
   stage.position.set(0, 0, 0);
 }
 
@@ -407,7 +429,7 @@ function frame() {
     if (progress < 0.004) { progress = 0; retracting = false; window.scrollTo(0, 0); }
     layout(reduced ? 0 : progress, now / 1000);
   } else {
-    if (!reduced && progress >= 0.92) enterFree();
+    if (!reduced && progress >= 0.84) enterFree();
     progress += (target - progress) * (reduced ? 1 : Math.min(1, dt * 6));
     layout(reduced ? 0 : progress, now / 1000);
   }
@@ -415,14 +437,48 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
+function applyNow(p) {
+  layout(reduced ? 0 : p, 0);
+  renderer.render(scene, camera);
+}
+
+function restartJourney() {
+  freeMode = false;
+  retracting = false;
+  panX = 0;
+  panY = 0;
+  window.scrollTo(0, 0);
+  target = 0;
+  progress = 0;
+  hintEl.style.display = '';
+  hintEl.style.opacity = '0.85';
+  replayBtn.style.display = 'none';
+  canvas.style.cursor = '';
+  applyNow(0);
+}
+
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
+  readScroll();
 }
 addEventListener('resize', resize);
 resize();
+
+// Snap to the real scroll position (0 after the reset) and paint the assembled
+// cube immediately — no wait for the first scroll event or the first rAF.
+readScroll();
+progress = target;
+applyNow(progress);
+
 requestAnimationFrame(frame);
+
+addEventListener('pageshow', e => {
+  if (e.persisted) restartJourney();
+});
+addEventListener('load', readScroll);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(readScroll);
 
 // ===================================================================== texture makers
 // Whimsical galaxy tile — a vivid purple/blue/pink nebula gradient with drifting
