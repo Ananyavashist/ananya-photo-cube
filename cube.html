@@ -226,8 +226,21 @@ FACES.forEach((face, fi) => {
 const texLoader = new THREE.TextureLoader();
 fetch('photos.json').then(r => r.ok ? r.json() : []).then(list => {
   if (!Array.isArray(list) || list.length === 0) return;
+
+  // Distribute photos across all 54 tiles so no two faces are identical.
+  // Each photo is used a balanced number of times, then the whole sequence is
+  // deterministically shuffled (same layout every reload).
+  const assign = [];
+  for (let i = 0; i < cards.length; i++) assign.push(i % list.length);
+  let s = 987654321 >>> 0;
+  const rr = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
+  for (let i = assign.length - 1; i > 0; i--) {
+    const j = Math.floor(rr() * (i + 1));
+    [assign[i], assign[j]] = [assign[j], assign[i]];
+  }
+
   cards.forEach((card, i) => {
-    const name = list[i % list.length];
+    const name = list[assign[i]];
     texLoader.load('photos/' + name, tex => {
       tex.colorSpace = THREE.SRGBColorSpace;
       coverCrop(tex);
