@@ -1,4 +1,4 @@
-# ANANYA — photo cube
+# Scroll Animated Photo Cube
 
 A scroll-driven WebGL hero: a 3×3 "Rubik-style" photo cube of 54 tiles that, as you
 scroll, separates outward → 54-tile constellation → flat editorial mosaic → an
