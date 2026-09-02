@@ -369,10 +369,10 @@ function layout(p, time) {
   // -------- phase weights (each eases over its own scroll window) ----------
   // Frame 1 (p≈0): assembled cube. The very next beat explodes the 26
   // cubies outward — they scatter instead of staying stuck together.
-  const wScatter = smooth(0.0, 0.07, p);
-  const wConstel = smooth(0.22, 0.48, p);   // radial constellation
-  const wFlat    = smooth(0.48, 0.72, p);   // collapse to flat mosaic
-  const wZoom    = smooth(0.76, 0.90, p);   // zoom into the mosaic, then hand off to free mode
+  const wScatter = smooth(0.0, 0.08, p);
+  const wConstel = smooth(0.08, 0.34, p);   // follows scatter with no dead zone
+  const wFlat    = smooth(0.32, 0.56, p);   // collapse to flat mosaic
+  const wZoom    = smooth(0.56, 0.78, p);   // zoom into the mosaic, then hand off to free mode
 
   const faceCam = clamp01(Math.max(wConstel * 0.8, wFlat));
 
@@ -399,7 +399,7 @@ function layout(p, time) {
   core.visible = false;
 
   // contact shadow fades once the cube is gone (no floor in the canvas phase)
-  shadow.material.opacity = 0.9 * (1 - smooth(0.38, 0.58, p));
+  shadow.material.opacity = 0.9 * (1 - smooth(0.18, 0.40, p));
   shadow.visible = shadow.material.opacity > 0.01;
 
   // -------- stage orientation + late-phase camera moves --------------------
@@ -429,7 +429,7 @@ function frame() {
     if (progress < 0.004) { progress = 0; retracting = false; window.scrollTo(0, 0); }
     layout(reduced ? 0 : progress, now / 1000);
   } else {
-    if (!reduced && progress >= 0.92) enterFree();
+    if (!reduced && progress >= 0.84) enterFree();
     progress += (target - progress) * (reduced ? 1 : Math.min(1, dt * 6));
     layout(reduced ? 0 : progress, now / 1000);
   }
